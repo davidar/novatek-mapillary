@@ -1,0 +1,26 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "novatek-mapillary"
+version = "0.1.0"
+description = "Geotag Novatek dashcam clips (Vantrue and others) for Mapillary from their embedded GPS, with privacy pruning"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+dependencies = []
+keywords = ["dashcam", "mapillary", "novatek", "vantrue", "gps", "mp4"]
+
+[project.urls]
+Homepage = "https://github.com/davidar/novatek-mapillary"
+Issues = "https://github.com/davidar/novatek-mapillary/issues"
+
+[project.scripts]
+novatek-mapillary = "novatek_mapillary.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

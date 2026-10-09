@@ -1,0 +1,13 @@
+__pycache__/
+*.egg-info/
+.venv/
+dist/
+uv.lock
+# never commit video, even synthetic: tests/synth_clip.py generates it
+*.mp4
+*.MP4
+*.mov
+*.MOV
+# a private config (example in examples/config.example.sh)
+config.sh
+.pytest_cache/
