@@ -21,12 +21,33 @@ from .dat import default_dat_dir, load_track
 from .geo import bearing, format_tz, infer_tz, name_time
 
 
-def find_clips(root: Path) -> list[Path]:
+def _files(root: Path, exclude: Path | None = None):
+    """Every file under `root`, skipping dot-files and dot-folders, and everything under `exclude`
+    when it is inside `root` (an output folder kept inside the card copy)."""
+    base = root.resolve()
+    ex = exclude.resolve() if exclude is not None else None
+    if ex is not None and (ex == base or base not in ex.parents):
+        ex = None  # not inside root: nothing to skip (a root inside `exclude` is fine)
+    for p in root.rglob("*"):
+        rel = p.relative_to(root)
+        if any(part.startswith(".") for part in rel.parts):
+            continue
+        if ex is not None and (base / rel == ex or ex in (base / rel).parents):
+            continue
+        if p.is_file():
+            yield p
+
+
+def find_clips(root: Path, exclude: Path | None = None) -> list[Path]:
     """Every .mp4 under `root` (any case, any folder: Vantrue's Normal/ and Event/ interleave into
-    one timeline), in filename-time order."""
-    clips = [p for p in root.rglob("*") if p.suffix.lower() == ".mp4" and p.is_file()
-             and not any(part.startswith(".") for part in p.relative_to(root).parts)]
+    one timeline), in filename-time order. `build` and `archive` agree on this list."""
+    clips = [p for p in _files(root, exclude) if p.suffix.lower() == ".mp4"]
     return sorted(clips, key=lambda p: (name_time(p.name) or dt.datetime.min, p.name))
+
+
+def find_other_files(root: Path, exclude: Path | None = None) -> list[Path]:
+    """Every file under `root` that find_clips doesn't return (for `archive --copy-other`)."""
+    return sorted(p for p in _files(root, exclude) if p.suffix.lower() != ".mp4")
 
 
 def fix_clock_steps(descs: list[dict], min_step: float = 3.0, verbose: bool = True) -> int:
@@ -59,16 +80,24 @@ def fix_clock_steps(descs: list[dict], min_step: float = 3.0, verbose: bool = Tr
 
 def build(clips: list[Path], tz: dt.timezone | None = None, dat_dir: Path | None = None,
           make: str | None = None, model: str | None = None, lead: float = 0.0,
-          min_points: int = 5, dat_offset: float = -1.0, verbose: bool = True):
+          min_points: int = 5, dat_offset: float = -1.0, verbose: bool = True,
+          embedded: dict | None = None):
     """
     Returns (per_day, skipped, tz): per_day maps 'YYYYMMDD' to a list of descriptions sorted by
     filename. `tz` is the camera clock's UTC offset; None infers it from the embedded fixes.
+    `embedded` may map clips to novatek.clip_track(clip, min_points=1) results already read
+    (None for unreadable), so the clips aren't read again.
     """
     say = print if verbose else (lambda *a, **k: None)
 
     # Pass 1: the embedded records, which need no clock assumptions.
-    embedded: dict[Path, tuple | None] = {}
+    given = embedded or {}
+    embedded = {}
     for clip in clips:
+        if clip in given:
+            fit = given[clip]
+            embedded[clip] = fit if fit is not None and len(fit[1]) >= min_points else None
+            continue
         try:
             embedded[clip] = novatek.clip_track(clip, min_points=min_points)
         except Exception as ex:  # unreadable container: fall through to the .dat

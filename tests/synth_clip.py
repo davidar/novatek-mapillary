@@ -16,10 +16,13 @@ after the camera clock (Normal/YYYYMMDD_HHMMSS_NNNNN_N_A.MP4) plus a GPS/YYYYMMD
 """
 from __future__ import annotations
 
+import bisect
 import dataclasses
 import datetime as dt
 import math
+import shutil
 import struct
+import subprocess
 import sys
 from pathlib import Path
 
@@ -126,6 +129,99 @@ def write_clip(path: Path, start: float, fix_at, seconds: int = 60, fps: int = 3
     return path
 
 
+# --- decodable clips (ffmpeg) ---------------------------------------------------------------
+
+def have_ffmpeg() -> bool:
+    return shutil.which("ffmpeg") is not None and shutil.which("ffprobe") is not None
+
+
+def ffmpeg_clip(path: Path, seconds: float = 5, fps: int = 30, audio: bool = True,
+                size: str = "320x180") -> Path:
+    """A small decodable H.264 (+ AAC) clip from ffmpeg's test sources, moov last (no faststart)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    cmd = ["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", f"testsrc2=size={size}:rate={fps}"]
+    if audio:
+        cmd += ["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000"]
+    cmd += ["-t", str(seconds), "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p"]
+    if audio:
+        cmd += ["-c:a", "aac", "-b:a", "64k"]
+    subprocess.run(cmd + ["-f", "mp4", str(path)], check=True)
+    return path
+
+
+def write_decodable_clip(path: Path, start: float, fix_at, seconds: int = 5, fps: int = 30,
+                         latency: float = 0.3, step: dict[int, int] | None = None,
+                         stall: set[int] = frozenset(), valid: bool = True, audio: bool = True,
+                         moov_last: bool = False) -> Path:
+    """
+    Like `write_clip`, but the frames are real (ffmpeg's testsrc2, libx264, plus a sine tone
+    in AAC), so the clip can be re-encoded. ffmpeg's file is rewritten into the Novatek layout:
+    the video track gets one frame per chunk, record k (same schedule and arguments as
+    `write_clip`) is inserted into mdat right after frame k*fps-2, every track's chunk offsets
+    are shifted with `mp4write.shift_chunk_offsets`, and a `gps ` index box is added to moov,
+    which goes before mdat as on a Vantrue unless `moov_last`.
+    """
+    from novatek_mapillary import mp4write as w
+
+    step = step or {}
+    tmp = ffmpeg_clip(path.with_name(path.name + ".ffmpeg"), seconds, fps, audio)
+    boxes = w.top_level(tmp)
+    (_, mdat_off, mdat_size, mdat_h), = [b for b in boxes if b[0] == b"mdat"]
+    data = tmp.read_bytes()
+    tmp.unlink()
+    ftyp = next(data[o:o + s] for t, o, s, _ in boxes if t == b"ftyp")
+    payload_start = mdat_off + mdat_h
+    _, _, moov = w.read_moov_bytes(data)
+
+    # one video frame per chunk, as real clips have
+    vtrak = next(t for t in moov.find_all(b"trak") if w.handler(t) == b"vide")
+    vstbl = vtrak.find(b"mdia", b"minf", b"stbl")
+    frames = w.sample_table(vstbl)
+    for i, c in enumerate(vstbl.children):
+        if c.type == b"stsc":
+            desc = struct.unpack(">I", c.data[16:20])[0]
+            vstbl.children[i] = w.Box(b"stsc", w.full() + struct.pack(">4I", 1, 1, 1, desc))
+    w.set_chunk_offsets(vstbl, [o for o, _, _ in frames])
+
+    # the records, inserted after frame k*fps-2 (old absolute offsets)
+    inserts: list[tuple[int, bytes]] = []
+    sentence = None
+    for i in range(len(frames)):
+        if (i + 2) % fps == 0:
+            k = (i + 2) // fps
+            if k not in stall or sentence is None:
+                fix_epoch = math.floor(start + (i / fps) - latency)
+                f = fix_at(fix_epoch)
+                sentence = rmc(fix_epoch + step.get(k, 0), f.lat, f.lon, f.speed, f.course, valid)
+            inserts.append((frames[i][0] + frames[i][1], gps_record(sentence)))
+    positions = [p for p, _ in inserts]
+    cum = [0]
+    for _, rec in inserts:
+        cum.append(cum[-1] + len(rec))
+
+    parts, last = [], payload_start
+    for pos, rec in inserts:
+        parts += [data[last:pos], rec]
+        last = pos
+    parts.append(data[last:mdat_off + mdat_size])
+    new_payload = b"".join(parts)
+
+    gps_len = 8 + 8 * (len(inserts) + 1)
+    moov.children.append(w.Box(b"gps ", bytes(gps_len - 8)))
+    moov_len = len(moov.to_bytes())
+    new_start = len(ftyp) + 8 + (0 if moov_last else moov_len)
+
+    def fn(o):  # old absolute offset -> new
+        return o - payload_start + new_start + cum[bisect.bisect_right(positions, o)]
+    w.shift_chunk_offsets(moov, fn)
+    index = [(0, 0)] + [(pos - payload_start + new_start + cum[j], len(rec))
+                        for j, (pos, rec) in enumerate(inserts)]
+    moov.children[-1] = w.Box(b"gps ", b"".join(struct.pack(">2I", *e) for e in index))
+    mdat = struct.pack(">I4s", 8 + len(new_payload), b"mdat") + new_payload
+    path.write_bytes(ftyp + mdat + moov.to_bytes() if moov_last else ftyp + moov.to_bytes() + mdat)
+    return path
+
+
 # --- a day of driving ------------------------------------------------------------------------
 
 def offset(lat: float, lon: float, north_m: float, east_m: float) -> tuple[float, float]:
@@ -169,11 +265,13 @@ def simulate(start: int, lat: float, lon: float, schedule) -> Day:
 
 
 def write_card(root: Path, day: Day, tz: dt.timezone, clip_seconds: int = 60, latency: float = 0.3,
-               start_frac: float = 0.4, dat: bool = True, clip_kwargs=None, first_index: int = 1):
+               start_frac: float = 0.4, dat: bool = True, clip_kwargs=None, first_index: int = 1,
+               writer=write_clip, min_seconds: int = 10):
     """
     Writes Normal/*.MP4 (one clip per clip_seconds while the camera is on) and GPS/YYYYMMDD.dat.
     Each clip starts `start_frac` s after a whole second of UTC. `clip_kwargs` maps a clip number
-    (0-based) to extra write_clip arguments. Returns the clip paths.
+    (0-based) to extra `writer` arguments (`write_clip`, or `write_decodable_clip` for clips
+    that ffmpeg can decode). Returns the clip paths.
     """
     clip_kwargs = clip_kwargs or {}
     clips, n = [], 0
@@ -181,11 +279,11 @@ def write_card(root: Path, day: Day, tz: dt.timezone, clip_seconds: int = 60, la
         t = a
         while t < b:
             secs = min(clip_seconds, b - t)
-            if secs < 10:
+            if secs < min_seconds:
                 break
             local = dt.datetime.fromtimestamp(t, tz)
             name = f"{local:%Y%m%d_%H%M%S}_{first_index + n:05d}_N_A.MP4"
-            clips.append(write_clip(root / "Normal" / name, t + start_frac, day.fix_at, seconds=secs,
+            clips.append(writer(root / "Normal" / name, t + start_frac, day.fix_at, seconds=secs,
                                     latency=latency, **clip_kwargs.get(n, {})))
             n += 1
             t += secs

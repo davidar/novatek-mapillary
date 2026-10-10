@@ -2,8 +2,10 @@
 
 Geotags dashcam clips from Novatek-based cameras (Vantrue and others) for Mapillary. It reads the
 GPS records embedded in each MP4 and writes `mapillary_tools` video description JSON, then prunes
-out clips that would show where the car parks. Standard library only. `README.md` is the user doc
-and holds the format facts and gotchas; read it first.
+out clips that would show where the car parks, and re-encodes clips for keeping with the GPS as a
+CAMM track (`archive`). Standard library only; `archive` runs ffmpeg/ffprobe as subprocesses.
+`README.md` is the user doc and holds the format facts and gotchas; read it first.
+`docs/archive-design.md` is the design `archive` was built from.
 
 ## Where this came from
 
@@ -25,19 +27,29 @@ that follow from that:
   - `novatek.py`: MP4 box parsing, `gps ` index, `$GNRMC` records, per-clip start fit, clock-step re-stamping.
   - `dat.py`: the optional per-day `.dat` track, which supplies altitude, the fallback track and verify's cross-check.
   - `geo.py`: distance, bearing, timezones, filename times, and `infer_tz`.
-  - `build.py`: clips → per-day descriptions; `fix_clock_steps` re-anchors whole clips.
+  - `build.py`: clips → per-day descriptions; `fix_clock_steps` re-anchors whole clips. `find_clips`
+    is the one definition of a clip, shared with `archive`.
   - `verify.py`: sanity checks.
   - `prune.py`: privacy pruning.
-  - `cli.py`: the `parse`/`build`/`verify`/`prune` subcommands.
+  - `mp4write.py`: byte-level box writing: CAMM track append, `udta` tags, faststart,
+    chunk-offset rewriting, and `read_camm` to read the track back.
+  - `archive.py`: the `archive` pipeline: ffmpeg encode, CAMM, verify, manifest and resume.
+  - `cli.py`: the `parse`/`build`/`verify`/`prune`/`archive` subcommands.
   - `__main__.py`: entry point for `python -m novatek_mapillary`.
 - `tests/`
   - `synth_clip.py`: the synthetic clip and day generator. It also runs as a script and writes a demo card.
-  - `test_novatek.py`, `test_pipeline.py`: 23 tests.
+    `write_decodable_clip` makes clips ffmpeg can decode (testsrc2 + sine, rewritten into the
+    Novatek layout) for the `archive` tests.
+  - `test_novatek.py`, `test_pipeline.py`: 23 tests, no ffmpeg needed.
+  - `test_mp4write.py`, `test_archive.py`: 38 tests that skip without ffmpeg. One also needs
+    `mapillary_tools` (`uv run --group dev --with mapillary_tools pytest tests/test_mp4write.py`).
+    One more needs ffmpeg built with libsvtav1.
 - `examples/`: `sync_card.sh`, `upload_all.sh`, `upload_status.sh` and `config.example.sh`. These
   are the scripts used on the trip, made generic and driven by the private config.
-- `.github/workflows/tests.yml`: pytest on Python 3.10–3.14 plus `uv build` and shellcheck.
+  `archive_all.sh` was written afterwards in the same shape, and hasn't been used on a real trip.
+- `.github/workflows/tests.yml`: pytest on Python 3.10–3.14 (with ffmpeg from apt) plus `uv build` and shellcheck.
 
-Run the tests with `uv run --group dev pytest` (about 2 s). Build with `uv build`; the wheel installs the
+Run the tests with `uv run --group dev pytest` (about a minute with ffmpeg, 2 s without). Build with `uv build`; the wheel installs the
 `novatek-mapillary` console script. The example scripts pass shellcheck (`shellcheck -x examples/*.sh`).
 
 ## How it was verified

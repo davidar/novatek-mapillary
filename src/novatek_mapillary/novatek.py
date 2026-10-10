@@ -44,6 +44,9 @@ class ClipInfo:
     chunk_offsets: list[int]
     chunk_first_sample: list[int]
     sample_delta: float  # seconds per video sample (assumes constant frame rate)
+    timescale: int = 0   # the video track's media timescale (mdhd)
+    width: int = 0       # the video track's size (tkhd)
+    height: int = 0
 
 
 def _boxes(data, off, end):
@@ -125,6 +128,7 @@ def parse_clip(path: Path) -> ClipInfo | None:
         gps = [struct.unpack(">2I", data[o + h + 8 * i:o + h + 8 * i + 8]) for i in range(n)]
     # video track sample tables
     chunks, first_sample, delta = [], [], 1 / 30
+    vts = width = height = 0
     for to, tsz, th in _find(data, [b"trak"], mo + mh, mo + ms):
         ho, hs, hh = next(_find(data, [b"mdia", b"hdlr"], to + th, to + tsz))
         if data[ho + hh + 8:ho + hh + 12] != b"vide":
@@ -132,6 +136,10 @@ def parse_clip(path: Path) -> ClipInfo | None:
         o, s, h = next(_find(data, [b"mdia", b"mdhd"], to + th, to + tsz))
         timescale = struct.unpack(">I", data[o + h + 12:o + h + 16])[0] if data[o + h] == 0 \
             else struct.unpack(">I", data[o + h + 20:o + h + 24])[0]
+        vts = timescale
+        ko, ks, kh = next(_find(data, [b"tkhd"], to + th, to + tsz))
+        if ks - kh >= 84:
+            width, height = (v >> 16 for v in struct.unpack(">2I", data[ko + ks - 8:ko + ks]))
         so, ss, sh = next(_find(data, [b"mdia", b"minf", b"stbl"], to + th, to + tsz))
         tab = {typ: (o, s, h) for typ, o, s, h in _boxes(data, so + sh, so + ss)}
         if b"stco" in tab:
@@ -153,7 +161,7 @@ def parse_clip(path: Path) -> ClipInfo | None:
             first_sample.append(idx)
             idx += spc
         break
-    return ClipInfo(duration, gps, chunks, first_sample, delta)
+    return ClipInfo(duration, gps, chunks, first_sample, delta, vts, width, height)
 
 
 def mp4_duration(path: Path) -> float | None:
@@ -196,7 +204,7 @@ def read_records(path: Path, info: ClipInfo | None = None) -> list[Record]:
 CLOCK_STEP_S = 3.0
 
 
-def clip_track(path: Path, min_points: int = 5):
+def clip_track(path: Path, min_points: int = 5, info: ClipInfo | None = None, recs: list[Record] | None = None):
     """
     Returns (start_epoch, fixes, duration) where fixes is a list of unique valid Records sorted
     by epoch, and start_epoch is the fitted UTC epoch of video time 0. None if too few fixes.
@@ -213,9 +221,10 @@ def clip_track(path: Path, min_points: int = 5):
     the rounded difference before de-duplication; otherwise a stepped-back record would win the
     "first occurrence" and put its position 10+ s away in the video.
     Stalls (the same fix repeated) only ever read 1–2 s behind, so they are left alone.
+    `info` and `recs` (from parse_clip / read_records) save reading the clip again.
     """
-    info = parse_clip(path)
-    recs = [r for r in read_records(path, info) if r.valid]
+    info = info or parse_clip(path)
+    recs = [r for r in (recs if recs is not None else read_records(path, info)) if r.valid]
     if recs:
         offs = sorted(r.epoch - r.video_t for r in recs)
         med = offs[len(offs) // 2]

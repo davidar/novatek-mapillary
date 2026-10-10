@@ -21,3 +21,12 @@ PRUNE_ARGS=(
 
 # Optional: a second copy of the descriptions (they're small; the video isn't).
 BACKUP_DIR=
+
+# archive_all.sh: where the re-encoded clips go (another drive, free space on this one, a per-day
+# batch folder on the laptop: any path), and extra `novatek-mapillary archive` options.
+ARCHIVE_DST=/run/media/$USER/OtherDrive/dashcam-archive/my-trip
+ARCHIVE_ARGS=(
+  # --encoder software --quality 38      # see the README on checking the quality on your footage
+  # --make Vantrue --model N4
+  # --tz +10:00
+)

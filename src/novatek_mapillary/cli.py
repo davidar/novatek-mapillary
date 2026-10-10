@@ -7,6 +7,7 @@ import json
 import sys
 from pathlib import Path
 
+from . import archive as archive_mod
 from . import build as build_mod
 from . import novatek
 from .dat import default_dat_dir, load_track
@@ -94,6 +95,20 @@ def cmd_prune(a):
         print(f"  times in UTC{format_tz(tz)}  -> {out / path.name}")
 
 
+def cmd_archive(a):
+    opts = archive_mod.Options(
+        codec=a.codec, encoder=a.encoder, quality=a.quality, bitrate=a.bitrate, ten_bit=a.ten_bit, height=a.height, preset=a.preset,
+        faststart=not a.no_faststart, copy_other=a.copy_other, make=a.make, model=a.model, jobs=a.jobs,
+        verify_only=a.verify_only, quick=a.quick, dry_run=a.dry_run, desc_dir=a.desc, tz=_tz(a.tz),
+        dat_dir=a.dat_dir, ssim_warn=a.ssim_warn)
+    try:
+        code = archive_mod.run(a.src, a.dst, opts)
+    except KeyboardInterrupt:
+        print("interrupted; rerun to continue", file=sys.stderr)
+        code = 130
+    sys.exit(code)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="novatek-mapillary", description=__doc__)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -144,6 +159,44 @@ def main(argv=None):
                         "(minus --buffer) to the end of the day (repeatable)")
     p.add_argument("--tz", default="auto", help="timezone for the report; " + tz_help)
     p.set_defaults(func=cmd_prune)
+
+    p = sub.add_parser("archive", help="re-encode clips for keeping, GPS as a CAMM track",
+                       description=archive_mod.__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("src", type=Path, help="card copy: every .mp4 under it (never written to)")
+    p.add_argument("dst", type=Path, help="archive root: the same relative paths, plus the manifest")
+    p.add_argument("--desc", type=Path, default=None, metavar="DIR",
+                   help="per-day description JSON from a previous build [default: build them in memory]")
+    p.add_argument("--codec", choices=["av1", "hevc", "h264", "copy"], default="av1",
+                   help="[default: av1] copy: remux only, no loss (still adds CAMM and tags); "
+                        "h264 is for tests and old players")
+    q = p.add_mutually_exclusive_group()
+    q.add_argument("--quality", type=int, default=None,
+                   help="constant quality: CRF (software) or CQ (NVENC) [default: per codec]")
+    q.add_argument("--bitrate", default=None, metavar="RATE", help="target bitrate instead, e.g. 8M (maxrate 1.5x)")
+    p.add_argument("--encoder", choices=["auto", "nvenc", "software"], default="auto",
+                   help="auto: NVENC if a one-frame test encode works, else software [default: auto]")
+    p.add_argument("--ten-bit", action=argparse.BooleanOptionalAction, default=None,
+                   help="10-bit output: free and harmless, less banding [default: on for av1/hevc]")
+    p.add_argument("--height", type=int, default=None, metavar="N",
+                   help=f"downscale to N lines, keeping the aspect; never upscales; 0 keeps the source size "
+                        f"[default: {archive_mod.DEFAULT_HEIGHT}; ignored by --codec copy]")
+    p.add_argument("--preset", default=None, metavar="P",
+                   help="software encoder preset: libsvtav1 number (0 slowest .. 13 fastest), libx265 name "
+                        "[default: 6 / slow]; not for NVENC")
+    p.add_argument("--no-faststart", action="store_true", help="leave moov at the end of the file")
+    p.add_argument("--copy-other", action="store_true", help="also copy every non-MP4 file (.dat, photos) unchanged")
+    p.add_argument("--make", default=None, help="camera make for udta [default: the description's, else none]")
+    p.add_argument("--model", default=None, help="camera model for udta [default: the description's, else none]")
+    p.add_argument("--jobs", type=int, default=None,
+                   help="clips in parallel [default: 1 for NVENC and copy; software: CPUs/8, 1 to 4]")
+    p.add_argument("--verify-only", action="store_true", help="re-check every archived clip against its source")
+    p.add_argument("--quick", action="store_true", help="skip the full decode when verifying")
+    p.add_argument("--dry-run", action="store_true", help="say what would be done, write nothing")
+    p.add_argument("--tz", default="auto", help=tz_help)
+    p.add_argument("--dat-dir", type=Path, default=None, help="as for build")
+    p.add_argument("--ssim-warn", type=float, default=archive_mod.SSIM_WARN,
+                   help=f"flag clips whose spot-check SSIM is below this [default: {archive_mod.SSIM_WARN}]")
+    p.set_defaults(func=cmd_archive)
 
     a = ap.parse_args(argv)
     a.func(a)
