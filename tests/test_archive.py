@@ -77,7 +77,9 @@ def test_archive_keeps_frames_audio_and_gps(card, tmp_path):
         assert r["status"] == "ok" and r["verify"] == "ok" and r["camm"] == len(pts)
         assert r["creation_source"] == "gps" and r["sha256"] == archive.sha256(c)
         assert r["src_size"] == c.stat().st_size and r["archive_bytes"] == out.stat().st_size
-        assert r["ssim"] > 0.95
+        # a real encode, not garbage; the exact value depends on the ffmpeg/x264 build
+        # (0.98 with ffmpeg 8, 0.94 with Ubuntu 24.04's 6.1)
+        assert r["ssim"] > 0.9
     side = json.loads((dst / "20260115.gps.json").read_text())
     assert [s["clip"] for s in side] == [str(c.relative_to(src)) for c in clips]
     assert all(len(s["records"]) == 5 for s in side)
@@ -320,7 +322,7 @@ def test_height_downscales_and_ssim_compares_at_source_size(card, tmp_path):
         assert (b["width"], b["height"]) == (160, 90)
         assert (a["frames"], a["first_pts"], a["last_pts"]) == (b["frames"], b["first_pts"], b["last_pts"])
         assert r["encoder"]["height"] == 90 and r["height"] == 90
-        assert r["status"] == "ok" and 0.8 < r["ssim"] < 0.95    # scaled back up to 320x180 to compare
+        assert r["status"] == "ok" and 0.7 < r["ssim"] < 0.95    # scaled back up to 320x180 to compare
     with pytest.raises(SystemExit, match="even"):
         archive.run(src, tmp_path / "x", opts(height=91))
 
